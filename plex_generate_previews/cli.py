@@ -5,38 +5,40 @@ Main entry point that orchestrates all components: configuration,
 GPU detection, Plex connection, and worker pool management.
 """
 
+import argparse
 import os
-import sys
 import shutil
 import signal
-import argparse
+import sys
+
 from loguru import logger
-from rich.console import Console
+from rich.console import Console, Group
+from rich.live import Live
 from rich.progress import (
-    Progress,
-    SpinnerColumn,
-    MofNCompleteColumn,
-    ProgressColumn,
     BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    ProgressColumn,
+    SpinnerColumn,
     TextColumn,
     TimeElapsedColumn,
 )
-from rich.live import Live
-from rich.console import Group
 from rich.text import Text
 
 from .config import load_config
 from .gpu_detection import detect_all_gpus, format_gpu_info
-from .media_processing import log_failure_summary, clear_failures
-from .plex_client import plex_server, get_library_sections
-from .worker import WorkerPool
+from .logging_config import setup_logging
+from .media_processing import clear_failures, log_failure_summary
+from .plex_client import get_library_sections, plex_server
 from .utils import (
     calculate_title_width,
-    setup_working_directory as create_working_directory,
     is_windows,
 )
+from .utils import (
+    setup_working_directory as create_working_directory,
+)
 from .version_check import check_for_updates
-from .logging_config import setup_logging
+from .worker import WorkerPool
 
 # Shared console for coordinated logging and progress output
 console = Console()
@@ -48,13 +50,34 @@ class ApplicationState:
     def __init__(self):
         self.config = None
         self.console = console
+        self.shutting_down = False
+        self.worker_pool = None
+        self._cleanup_completed = False
 
     def set_config(self, config):
         """Set the configuration object."""
         self.config = config
 
+    def request_shutdown(self) -> None:
+        """Mark app as shutting down and stop active workers if available."""
+        if self.shutting_down:
+            return
+
+        self.shutting_down = True
+        logger.debug("Application shutdown requested")
+
+        if self.worker_pool is not None:
+            logger.info("Waiting for workers to stop before final cleanup")
+            self.worker_pool.shutdown()
+
     def cleanup(self):
         """Perform cleanup operations."""
+        if self._cleanup_completed:
+            logger.debug("Cleanup already completed; skipping duplicate cleanup call")
+            return
+
+        logger.debug("Running application cleanup")
+
         # Restore terminal cursor visibility using Rich's proper methods
         if self.console:
             try:
@@ -79,14 +102,24 @@ class ApplicationState:
         try:
             if self.config and self.config.working_tmp_folder:
                 if os.path.isdir(self.config.working_tmp_folder):
+                    logger.debug(
+                        f"Cleaning up working temp folder: {self.config.working_tmp_folder}"
+                    )
                     shutil.rmtree(self.config.working_tmp_folder)
                     logger.debug(
                         f"Cleaned up working temp folder: {self.config.working_tmp_folder}"
+                    )
+                else:
+                    logger.debug(
+                        "Working temp folder already absent, skipping cleanup: "
+                        f"{self.config.working_tmp_folder}"
                     )
         except Exception as cleanup_error:
             logger.warning(
                 f"Failed to clean up working temp folder during interrupt: {cleanup_error}"
             )
+        finally:
+            self._cleanup_completed = True
 
 
 # Global application state
@@ -271,11 +304,8 @@ def parse_arguments() -> argparse.Namespace:
 def signal_handler(signum, frame):
     """Handle interrupt signals gracefully."""
     logger.info("Received interrupt signal, shutting down gracefully...")
-
-    # Perform cleanup using global application state
-    app_state.cleanup()
-
-    sys.exit(0)
+    app_state.request_shutdown()
+    raise KeyboardInterrupt
 
 
 def list_gpus() -> None:
@@ -520,6 +550,7 @@ def run_processing(
             cpu_workers=config.cpu_threads,
             selected_gpus=selected_gpus,
         )
+        app_state.worker_pool = worker_pool
 
         # Process all library sections
         total_processed = 0
@@ -663,6 +694,8 @@ def run_processing(
                 worker_pool.shutdown()
         except Exception as worker_error:
             logger.warning(f"Failed to shutdown worker pool: {worker_error}")
+        finally:
+            app_state.worker_pool = None
 
         # Clean up our working temp folder
         try:

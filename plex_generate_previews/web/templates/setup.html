@@ -860,14 +860,16 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // Copy token to clipboard
     document.getElementById('copyTokenBtn').addEventListener('click', async function() {
-        try {
-            await navigator.clipboard.writeText(tokenValue);
+        const copied = await copyToClipboard(
+            tokenValue,
+            'Token copied to clipboard',
+            'Failed to copy token'
+        );
+        if (copied) {
             this.innerHTML = '<i class="bi bi-check"></i>';
             setTimeout(() => {
                 this.innerHTML = '<i class="bi bi-clipboard"></i>';
             }, 2000);
-        } catch (error) {
-            alert('Failed to copy token');
         }
     });
 

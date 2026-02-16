@@ -24,6 +24,46 @@ function escapeHtml(str) {
     return div.innerHTML;
 }
 
+async function copyToClipboard(text, successMessage = 'Copied to clipboard', errorMessage = 'Failed to copy to clipboard') {
+    const stringValue = String(text ?? '');
+
+    try {
+        if (window.isSecureContext && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+            await navigator.clipboard.writeText(stringValue);
+            showToast('Copied', successMessage, 'success');
+            return true;
+        }
+    } catch (error) {
+        console.debug('Clipboard API unavailable, trying fallback copy.', error);
+    }
+
+    const textarea = document.createElement('textarea');
+    textarea.value = stringValue;
+    textarea.setAttribute('readonly', '');
+    textarea.style.position = 'fixed';
+    textarea.style.left = '-9999px';
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+
+    let copied = false;
+    try {
+        copied = document.execCommand('copy');
+    } catch (error) {
+        copied = false;
+    } finally {
+        document.body.removeChild(textarea);
+    }
+
+    if (copied) {
+        showToast('Copied', successMessage, 'success');
+    } else {
+        showToast('Error', errorMessage, 'danger');
+    }
+
+    return copied;
+}
+
 // Initialize dashboard
 function initDashboard() {
     // Connect to SocketIO
@@ -791,11 +831,7 @@ function clearLogSearch() {
 
 function copyLogs() {
     const text = _rawLogs.join('\n');
-    navigator.clipboard.writeText(text).then(() => {
-        showToast('Copied', 'Logs copied to clipboard', 'success');
-    }).catch(() => {
-        showToast('Error', 'Failed to copy logs', 'danger');
-    });
+    copyToClipboard(text, 'Logs copied to clipboard', 'Failed to copy logs');
 }
 
 function downloadLogs() {

@@ -121,33 +121,45 @@ class CodecNotSupportedError(Exception):
     pass
 
 
-def _is_signal_killed(returncode: int) -> bool:
-    """
-    Detect if FFmpeg was killed by a signal (crash, OOM, etc.).
+def _diagnose_ffmpeg_exit_code(returncode: int) -> str:
+    """Classify FFmpeg exit codes into actionable diagnostics.
 
-    On Linux, when a process is killed by a signal, the exit code is
-    128 + signal_number. Common examples:
-      - 137 = 128 + 9 (SIGKILL, often OOM killer)
-      - 139 = 128 + 11 (SIGSEGV, segfault)
-      - 134 = 128 + 6 (SIGABRT)
-      - 187, 251, etc. can occur with non-standard signals or wrappers
-
-    On some systems FFmpeg may also return large positive codes (> 128)
-    when it encounters fatal internal errors.
+    Known signal exit codes are explicitly mapped. Values greater than 128
+    that do not map to known signal exits are treated as non-signal failures
+    to avoid misclassifying I/O and runtime errors as signal kills.
 
     Args:
         returncode: FFmpeg process exit code
 
     Returns:
-        bool: True if the exit code indicates a signal kill / crash
+        str: Diagnostic classification string
     """
-    # Negative codes on Windows indicate unhandled exceptions
+    if returncode == 0:
+        return "success"
+
     if returncode < 0:
-        return True
-    # On POSIX, 128+N means killed by signal N
+        return f"signal:{abs(returncode)}"
+
+    known_signals = {
+        130: "SIGINT",
+        137: "SIGKILL",
+        143: "SIGTERM",
+    }
+    if returncode in known_signals:
+        return f"signal:{known_signals[returncode]}"
+
+    if returncode == 251:
+        return "io_error"
+
     if returncode > 128:
-        return True
-    return False
+        return "high_exit_non_signal"
+
+    return "error"
+
+
+def _is_signal_killed(returncode: int) -> bool:
+    """Detect if FFmpeg was killed by a known signal."""
+    return _diagnose_ffmpeg_exit_code(returncode).startswith("signal:")
 
 
 def _save_ffmpeg_failure_log(
@@ -178,9 +190,11 @@ def _save_ffmpeg_failure_log(
     log_path = os.path.join(log_dir, f"{timestamp}_{base}.log")
 
     try:
+        exit_diagnosis = _diagnose_ffmpeg_exit_code(returncode)
         with open(log_path, "w", encoding="utf-8") as fh:
             fh.write(f"file: {video_file}\n")
             fh.write(f"exit_code: {returncode}\n")
+            fh.write(f"exit_diagnosis: {exit_diagnosis}\n")
             fh.write(f"signal_killed: {_is_signal_killed(returncode)}\n")
             fh.write(f"lines: {len(stderr_lines)}\n")
             fh.write("-" * 72 + "\n")
@@ -228,6 +242,57 @@ def _detect_dolby_vision_rpu_error(stderr_lines: List[str]) -> bool:
 
     stderr_text = " ".join(stderr_lines).lower()
     return any(sig in stderr_text for sig in fatal_signatures)
+
+
+def _verify_tmp_folder_health(
+    path: str, min_free_mb: int = 512
+) -> Tuple[bool, List[str]]:
+    """Verify that a temporary directory is writable and has free space.
+
+    Args:
+        path: Temporary directory path to validate.
+        min_free_mb: Warning threshold for free disk space in MB.
+
+    Returns:
+        Tuple of ``(is_healthy, messages)`` where messages contains warning
+        and error diagnostics suitable for logging.
+    """
+    messages: List[str] = []
+
+    if not path:
+        return False, ["Temporary directory path is empty"]
+
+    try:
+        os.makedirs(path, exist_ok=True)
+    except OSError as error:
+        return False, [f"Unable to create temporary directory {path}: {error}"]
+
+    probe_path = os.path.join(path, f".tmp_write_probe_{os.getpid()}_{time.time_ns()}")
+    try:
+        with open(probe_path, "w", encoding="utf-8") as probe_file:
+            probe_file.write("ok")
+        os.remove(probe_path)
+    except OSError as error:
+        try:
+            if os.path.exists(probe_path):
+                os.remove(probe_path)
+        except OSError:
+            pass
+        return False, [f"Temporary directory is not writable: {path} ({error})"]
+
+    try:
+        usage = shutil.disk_usage(path)
+        free_mb = usage.free / (1024 * 1024)
+        if free_mb < min_free_mb:
+            messages.append(
+                f"Temporary directory {path} has low free space ({free_mb:.1f} MB < {min_free_mb} MB)"
+            )
+    except OSError as error:
+        messages.append(
+            f"Unable to read disk usage for temporary directory {path}: {error}"
+        )
+
+    return True, messages
 
 
 def _detect_zscale_colorspace_error(stderr_lines: List[str]) -> bool:
@@ -839,19 +904,29 @@ def generate_images(
 
         # Error logging
         if proc.returncode != 0:
+            exit_diagnosis = _diagnose_ffmpeg_exit_code(proc.returncode)
             logger.error(
-                f"FFmpeg failed with return code {proc.returncode} for {video_file}"
+                f"FFmpeg failed with return code {proc.returncode} ({exit_diagnosis}) for {video_file}"
             )
 
             # Log last few stderr lines at WARNING level so users can diagnose
             # failures without needing DEBUG mode (especially for crashes/signals)
             if _is_signal_killed(proc.returncode):
-                signal_num = (
-                    proc.returncode - 128 if proc.returncode > 128 else proc.returncode
-                )
+                signal_detail = _diagnose_ffmpeg_exit_code(proc.returncode).split(
+                    ":", 1
+                )[1]
                 logger.warning(
-                    f"FFmpeg exited with code {proc.returncode} (possibly signal {signal_num}, "
-                    f"OOM, segfault, or internal error) for {video_file}"
+                    f"FFmpeg exited with code {proc.returncode} due to signal {signal_detail} for {video_file}"
+                )
+            elif exit_diagnosis == "io_error":
+                logger.warning(
+                    f"FFmpeg reported an I/O error while writing temp output for {video_file}; "
+                    f"temp_directory={output_folder}, exists={os.path.isdir(output_folder)}"
+                )
+            elif exit_diagnosis == "high_exit_non_signal":
+                logger.warning(
+                    f"FFmpeg exited with high non-signal code {proc.returncode} for {video_file}; "
+                    "likely a runtime/internal failure rather than process signal termination"
                 )
             if ffmpeg_output_lines:
                 tail = ffmpeg_output_lines[-5:]
@@ -1109,7 +1184,7 @@ def generate_images(
         # Record for end-of-run summary
         worker_ctx = "GPU" if (gpu is not None and not did_cpu_fallback) else "CPU"
         reason = (
-            f"FFmpeg exit {rc}{fallback_suffix}"
+            f"FFmpeg exit {rc} ({_diagnose_ffmpeg_exit_code(rc)}){fallback_suffix}"
             if rc != 0
             else f"0 images{fallback_suffix}"
         )
@@ -1197,7 +1272,11 @@ def _cleanup_temp_directory(tmp_path: str) -> None:
     """
     try:
         if os.path.exists(tmp_path):
+            logger.debug(f"Cleaning up temp directory: {tmp_path}")
             shutil.rmtree(tmp_path)
+            logger.debug(f"Cleaned up temp directory: {tmp_path}")
+        else:
+            logger.debug(f"Temp directory already absent, skipping cleanup: {tmp_path}")
     except Exception as cleanup_error:
         logger.warning(f"Failed to clean up temp directory {tmp_path}: {cleanup_error}")
 

@@ -11,6 +11,7 @@ import pytest
 from unittest.mock import MagicMock, patch, mock_open
 
 from plex_generate_previews.media_processing import (
+    _diagnose_ffmpeg_exit_code,
     generate_bif,
     parse_ffmpeg_progress_line,
     heuristic_allows_skip,
@@ -22,6 +23,7 @@ from plex_generate_previews.media_processing import (
     _is_dv_no_backward_compat,
     _detect_zscale_colorspace_error,
     _save_ffmpeg_failure_log,
+    _verify_tmp_folder_health,
     CodecNotSupportedError,
 )
 
@@ -1868,7 +1870,8 @@ class TestSaveFFmpegFailureLog:
         content = log_files[0].read_text(encoding="utf-8")
         assert "file: /media/test.mkv" in content
         assert "exit_code: 187" in content
-        assert "signal_killed: True" in content
+        assert "signal_killed: False" in content
+        assert "exit_diagnosis: high_exit_non_signal" in content
         assert "error line 1" in content
         assert "error line 2" in content
 
@@ -1897,6 +1900,52 @@ class TestSaveFFmpegFailureLog:
         monkeypatch.setenv("CONFIG_DIR", "/nonexistent/readonly/path")
         # Should not raise
         _save_ffmpeg_failure_log("/media/test.mkv", 1, ["error"])
+
+
+class TestDiagnoseFFmpegExitCode:
+    """Unit tests for _diagnose_ffmpeg_exit_code."""
+
+    @pytest.mark.parametrize(
+        ("returncode", "expected"),
+        [
+            (0, "success"),
+            (130, "signal:SIGINT"),
+            (137, "signal:SIGKILL"),
+            (143, "signal:SIGTERM"),
+            (251, "io_error"),
+            (187, "high_exit_non_signal"),
+            (-15, "signal:15"),
+            (1, "error"),
+        ],
+    )
+    def test_classifies_exit_codes(self, returncode: int, expected: str) -> None:
+        assert _diagnose_ffmpeg_exit_code(returncode) == expected
+
+
+class TestVerifyTmpFolderHealth:
+    """Unit tests for _verify_tmp_folder_health."""
+
+    def test_returns_healthy_for_writable_directory(self, tmp_path) -> None:
+        ok, messages = _verify_tmp_folder_health(str(tmp_path))
+        assert ok is True
+        assert messages == []
+
+    def test_returns_error_for_unwritable_directory(self, tmp_path) -> None:
+        with patch("builtins.open", side_effect=OSError("read-only")):
+            ok, messages = _verify_tmp_folder_health(str(tmp_path))
+        assert ok is False
+        assert messages
+        assert "not writable" in messages[0].lower()
+
+    def test_warns_when_disk_space_low(self, tmp_path) -> None:
+        with patch(
+            "plex_generate_previews.media_processing.shutil.disk_usage"
+        ) as mock_usage:
+            mock_usage.return_value = MagicMock(free=0)
+            ok, messages = _verify_tmp_folder_health(str(tmp_path), min_free_mb=1)
+        assert ok is True
+        assert messages
+        assert "low free space" in messages[0].lower()
 
 
 class TestHdrFormatNoneString:

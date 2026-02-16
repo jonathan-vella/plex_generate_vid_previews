@@ -340,13 +340,7 @@ async function clearHistory() {
 
 function copyUrl(elementId) {
     const input = document.getElementById(elementId);
-    navigator.clipboard.writeText(input.value).then(function() {
-        showToast('Copied', 'URL copied to clipboard.', 'success');
-    }).catch(function() {
-        input.select();
-        document.execCommand('copy');
-        showToast('Copied', 'URL copied to clipboard.', 'success');
-    });
+    copyToClipboard(input.value, 'URL copied to clipboard.', 'Failed to copy URL.');
 }
 
 function generateSecret() {

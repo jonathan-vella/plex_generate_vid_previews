@@ -5,17 +5,18 @@ Provides Worker and WorkerPool classes that use threading instead of
 multiprocessing for better simplicity and performance with FFmpeg tasks.
 """
 
+import queue
 import re
 import threading
 import time
-import queue
 from collections import deque
 from functools import partial
-from typing import List, Optional, Any, Tuple
+from typing import Any, List, Optional, Tuple
+
 from loguru import logger
 
 from .config import Config
-from .media_processing import process_item, CodecNotSupportedError
+from .media_processing import CodecNotSupportedError, process_item
 from .utils import format_display_title
 
 
@@ -342,7 +343,11 @@ class Worker:
         """Shutdown the worker gracefully."""
         if self.current_thread and self.current_thread.is_alive():
             # Wait for current task to complete (with timeout)
-            self.current_thread.join(timeout=5)
+            self.current_thread.join(timeout=60)
+            if self.current_thread.is_alive():
+                logger.warning(
+                    f"Worker {self.worker_id} did not finish within shutdown timeout"
+                )
 
     @staticmethod
     def find_available(workers: List["Worker"]) -> Optional["Worker"]:

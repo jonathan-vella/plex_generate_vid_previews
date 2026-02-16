@@ -2,16 +2,18 @@
 Tests for CLI functionality.
 """
 
-import pytest
 import signal
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
+
+import pytest
+
 from plex_generate_previews.cli import (
+    ApplicationState,
+    list_gpus,
     parse_arguments,
     setup_logging,
-    list_gpus,
-    ApplicationState,
-    signal_handler,
     setup_working_directory,
+    signal_handler,
 )
 
 
@@ -80,6 +82,16 @@ class TestApplicationState:
         state = ApplicationState()
         # Should not raise any exceptions
         state.cleanup()
+
+    def test_request_shutdown_marks_flag_and_stops_worker_pool(self):
+        """Shutdown request should set the flag and stop workers."""
+        state = ApplicationState()
+        state.worker_pool = MagicMock()
+
+        state.request_shutdown()
+
+        assert state.shutting_down is True
+        state.worker_pool.shutdown.assert_called_once()
 
     @patch("os.path.isdir")
     @patch("shutil.rmtree")
@@ -177,8 +189,9 @@ class TestAnimatedBarColumn:
 
     def test_animated_bar_column_render_no_total(self):
         """Test rendering when task has no total."""
-        from plex_generate_previews.cli import AnimatedBarColumn
         from unittest.mock import MagicMock
+
+        from plex_generate_previews.cli import AnimatedBarColumn
 
         bar = AnimatedBarColumn()
         task = MagicMock()
@@ -189,8 +202,9 @@ class TestAnimatedBarColumn:
 
     def test_animated_bar_column_render_in_progress(self):
         """Test rendering an in-progress task."""
-        from plex_generate_previews.cli import AnimatedBarColumn
         from unittest.mock import MagicMock
+
+        from plex_generate_previews.cli import AnimatedBarColumn
 
         bar = AnimatedBarColumn(bar_width=40)
         task = MagicMock()
@@ -203,8 +217,9 @@ class TestAnimatedBarColumn:
 
     def test_animated_bar_column_render_finished(self):
         """Test rendering a finished task."""
-        from plex_generate_previews.cli import AnimatedBarColumn
         from unittest.mock import MagicMock
+
+        from plex_generate_previews.cli import AnimatedBarColumn
 
         bar = AnimatedBarColumn(bar_width=40)
         task = MagicMock()
@@ -221,8 +236,9 @@ class TestFFmpegDataColumn:
 
     def test_ffmpeg_data_column_render_with_data(self):
         """Test rendering with FFmpeg data."""
-        from plex_generate_previews.cli import FFmpegDataColumn
         from unittest.mock import MagicMock
+
+        from plex_generate_previews.cli import FFmpegDataColumn
 
         column = FFmpegDataColumn()
         task = MagicMock()
@@ -239,8 +255,9 @@ class TestFFmpegDataColumn:
 
     def test_ffmpeg_data_column_render_no_data(self):
         """Test rendering without FFmpeg data."""
-        from plex_generate_previews.cli import FFmpegDataColumn
         from unittest.mock import MagicMock
+
+        from plex_generate_previews.cli import FFmpegDataColumn
 
         column = FFmpegDataColumn()
         task = MagicMock()
@@ -255,30 +272,28 @@ class TestSignalHandler:
     """Test signal handling functionality."""
 
     @patch("plex_generate_previews.cli.app_state")
-    @patch("sys.exit")
     @patch("plex_generate_previews.cli.logger")
-    def test_signal_handler_interrupt(self, mock_logger, mock_exit, mock_state):
+    def test_signal_handler_interrupt(self, mock_logger, mock_state):
         """Test handling interrupt signal."""
-        signal_handler(signal.SIGINT, None)
+        with pytest.raises(KeyboardInterrupt):
+            signal_handler(signal.SIGINT, None)
 
         mock_logger.info.assert_called_once_with(
             "Received interrupt signal, shutting down gracefully..."
         )
-        mock_state.cleanup.assert_called_once()
-        mock_exit.assert_called_once_with(0)
+        mock_state.request_shutdown.assert_called_once()
 
     @patch("plex_generate_previews.cli.app_state")
-    @patch("sys.exit")
     @patch("plex_generate_previews.cli.logger")
-    def test_signal_handler_term(self, mock_logger, mock_exit, mock_state):
+    def test_signal_handler_term(self, mock_logger, mock_state):
         """Test handling terminate signal."""
-        signal_handler(signal.SIGTERM, None)
+        with pytest.raises(KeyboardInterrupt):
+            signal_handler(signal.SIGTERM, None)
 
         mock_logger.info.assert_called_once_with(
             "Received interrupt signal, shutting down gracefully..."
         )
-        mock_state.cleanup.assert_called_once()
-        mock_exit.assert_called_once_with(0)
+        mock_state.request_shutdown.assert_called_once()
 
 
 class TestSetupWorkingDirectory:

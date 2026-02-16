@@ -28,7 +28,12 @@ from flask_limiter.util import get_remote_address
 from flask_socketio import join_room, leave_room
 from loguru import logger
 
-from ..media_processing import clear_failures, get_failures, log_failure_summary
+from ..media_processing import (
+    _verify_tmp_folder_health,
+    clear_failures,
+    get_failures,
+    log_failure_summary,
+)
 from .auth import (
     api_token_required,
     is_authenticated,
@@ -1433,6 +1438,15 @@ def _start_job_async(job_id: str, config_overrides: dict = None):
             config.working_tmp_folder = create_working_directory(config.tmp_folder)
             logger.debug(f"Created working temp folder: {config.working_tmp_folder}")
 
+            tmp_ok, tmp_messages = _verify_tmp_folder_health(config.working_tmp_folder)
+            for message in tmp_messages:
+                logger.warning(message)
+                job_manager.add_log(job_id, f"WARNING - {message}")
+            if not tmp_ok:
+                raise RuntimeError(
+                    f"Working temp folder is not healthy: {config.working_tmp_folder}"
+                )
+
             # Run processing — use cached GPU results when available
             # to avoid expensive FFmpeg subprocess calls on every job.
             if _gpu_cache["result"] is not None:
@@ -1646,12 +1660,20 @@ def _start_job_async(job_id: str, config_overrides: dict = None):
                     config.working_tmp_folder
                 ):
                     try:
+                        logger.debug(
+                            f"Cleaning up working temp folder: {config.working_tmp_folder}"
+                        )
                         shutil.rmtree(config.working_tmp_folder)
                         logger.debug(
                             f"Cleaned up working temp folder: {config.working_tmp_folder}"
                         )
                     except Exception as cleanup_error:
                         logger.warning(f"Failed to clean up: {cleanup_error}")
+                elif config.working_tmp_folder:
+                    logger.debug(
+                        "Working temp folder already absent, skipping cleanup: "
+                        f"{config.working_tmp_folder}"
+                    )
 
         except Exception as e:
             logger.error(f"Job {job_id} failed: {e}")

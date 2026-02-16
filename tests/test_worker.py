@@ -5,13 +5,14 @@ Tests Worker class, WorkerPool, threading, task assignment,
 progress tracking, and error handling.
 """
 
-import time
 import queue
-import pytest
+import time
 from unittest.mock import MagicMock, patch
 
-from plex_generate_previews.worker import Worker, WorkerPool
+import pytest
+
 from plex_generate_previews.media_processing import CodecNotSupportedError
+from plex_generate_previews.worker import Worker, WorkerPool
 
 
 class TestWorker:
@@ -141,6 +142,17 @@ class TestWorker:
         workers[2].is_busy = True
         available = Worker.find_available(workers)
         assert available is None
+
+    def test_worker_shutdown_waits_for_longer_timeout(self):
+        """Worker shutdown should wait up to 60 seconds for current task."""
+        worker = Worker(0, "CPU")
+        thread = MagicMock()
+        thread.is_alive.side_effect = [True, False]
+        worker.current_thread = thread
+
+        worker.shutdown()
+
+        thread.join.assert_called_once_with(timeout=60)
 
     def test_worker_format_gpu_name(self):
         """Test GPU name formatting for display."""
