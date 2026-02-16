@@ -548,7 +548,7 @@ class WorkerPool:
         main_task_id=None,
         title_max_width: int = 20,
         library_name: str = "",
-    ) -> None:
+    ) -> dict:
         """
         Process all media items using available workers with Rich progress display.
 
@@ -635,7 +635,7 @@ class WorkerPool:
                     worker_progress.remove_task(worker.progress_task_id)
                     worker.progress_task_id = None
 
-        self._process_items_loop(
+        return self._process_items_loop(
             media_items=media_items,
             config=config,
             plex=plex,
@@ -656,7 +656,7 @@ class WorkerPool:
         progress_callback=None,
         worker_callback=None,
         cancel_check=None,
-    ) -> None:
+    ) -> dict:
         """
         Process all media items using available workers in headless mode (no Rich display).
 
@@ -739,7 +739,7 @@ class WorkerPool:
                     f"{library_prefix}Complete: {total_completed} successful, {total_failed} failed",
                 )
 
-        self._process_items_loop(
+        return self._process_items_loop(
             media_items=media_items,
             config=config,
             plex=plex,
@@ -762,7 +762,7 @@ class WorkerPool:
         on_poll: Optional[Any] = None,
         on_finish: Optional[Any] = None,
         cancel_check: Optional[Any] = None,
-    ) -> None:
+    ) -> dict:
         """
         Core processing loop shared by process_items and process_items_headless.
 
@@ -784,6 +784,9 @@ class WorkerPool:
         completed_tasks = 0
         total_items = len(media_items)
         last_overall_progress_log = time.time()
+        start_completed = sum(worker.completed for worker in self.workers)
+        start_failed = sum(worker.failed for worker in self.workers)
+        cancellation_requested = False
 
         library_prefix = f"[{library_name}] " if library_name else ""
 
@@ -794,6 +797,7 @@ class WorkerPool:
             # Check cancellation before doing more work
             if cancel_check and cancel_check():
                 logger.info(f"{library_prefix}Cancellation requested — stopping")
+                cancellation_requested = True
                 break
 
             # Check for completed tasks
@@ -848,8 +852,12 @@ class WorkerPool:
                         if not worker.requeued_to_cpu:
                             completed_tasks += 1
 
-                actual_completed = sum(worker.completed for worker in self.workers)
-                actual_failed = sum(worker.failed for worker in self.workers)
+                actual_completed = (
+                    sum(worker.completed for worker in self.workers) - start_completed
+                )
+                actual_failed = (
+                    sum(worker.failed for worker in self.workers) - start_failed
+                )
                 actual_processed = actual_completed + actual_failed
 
                 if actual_processed >= total_items:
@@ -861,8 +869,13 @@ class WorkerPool:
                             worker.check_completion()
                         busy_retries += 1
 
-                    actual_completed = sum(worker.completed for worker in self.workers)
-                    actual_failed = sum(worker.failed for worker in self.workers)
+                    actual_completed = (
+                        sum(worker.completed for worker in self.workers)
+                        - start_completed
+                    )
+                    actual_failed = (
+                        sum(worker.failed for worker in self.workers) - start_failed
+                    )
                     actual_processed = actual_completed + actual_failed
 
                     if (
@@ -882,8 +895,10 @@ class WorkerPool:
                 time.sleep(0.001)
 
         # Final statistics
-        total_completed = sum(worker.completed for worker in self.workers)
-        total_failed = sum(worker.failed for worker in self.workers)
+        total_completed = (
+            sum(worker.completed for worker in self.workers) - start_completed
+        )
+        total_failed = sum(worker.failed for worker in self.workers) - start_failed
 
         if on_finish:
             on_finish(total_completed, total_failed, total_items)
@@ -891,6 +906,13 @@ class WorkerPool:
         logger.info(
             f"Processing complete: {total_completed} successful, {total_failed} failed"
         )
+
+        return {
+            "completed": total_completed,
+            "failed": total_failed,
+            "total": total_items,
+            "cancelled": cancellation_requested,
+        }
 
     def _update_worker_progress(
         self,

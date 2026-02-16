@@ -554,6 +554,9 @@ def run_processing(
 
         # Process all library sections
         total_processed = 0
+        total_successful = 0
+        total_failed = 0
+        cancellation_requested = False
 
         if headless:
             # Headless mode - no Rich console display
@@ -567,6 +570,7 @@ def run_processing(
                 # Check cancellation between libraries
                 if cancel_check and cancel_check():
                     logger.info("Cancellation requested — skipping remaining libraries")
+                    cancellation_requested = True
                     break
 
                 if not media_items:
@@ -585,7 +589,7 @@ def run_processing(
                     )
 
                 # Process items without Rich progress displays
-                worker_pool.process_items_headless(
+                result = worker_pool.process_items_headless(
                     media_items,
                     config,
                     plex,
@@ -595,9 +599,16 @@ def run_processing(
                     worker_callback=worker_callback,
                     cancel_check=cancel_check,
                 )
-                total_processed += len(media_items)
+                total_successful += result["completed"]
+                total_failed += result["failed"]
+                total_processed += result["completed"] + result["failed"]
+                cancellation_requested = cancellation_requested or result["cancelled"]
 
                 logger.info(f"Completed processing library '{section.title}'")
+
+                if result["cancelled"]:
+                    logger.info("Cancellation requested — skipping remaining libraries")
+                    break
         else:
             # Interactive mode with Rich console display
             # Create progress displays
@@ -647,7 +658,7 @@ def run_processing(
                     )
 
                     # Process items in this section with worker progress
-                    worker_pool.process_items(
+                    result = worker_pool.process_items(
                         media_items,
                         config,
                         plex,
@@ -657,10 +668,21 @@ def run_processing(
                         title_max_width,
                         library_name=section.title,
                     )
-                    total_processed += len(media_items)
+                    total_successful += result["completed"]
+                    total_failed += result["failed"]
+                    total_processed += result["completed"] + result["failed"]
+                    cancellation_requested = (
+                        cancellation_requested or result["cancelled"]
+                    )
 
                     # Remove completed task
                     main_progress.remove_task(main_task)
+
+                    if result["cancelled"]:
+                        logger.info(
+                            "Cancellation requested — skipping remaining libraries"
+                        )
+                        break
 
                     # Switch back to query mode for next library
                     dynamic_group.set_query_mode()
@@ -671,9 +693,15 @@ def run_processing(
                 # Remove final query task
                 query_progress.remove_task(query_task)
 
-        logger.info(
-            f"Successfully processed {total_processed} media items across all libraries"
-        )
+        if cancellation_requested:
+            logger.info(
+                "Processing stopped by cancellation: "
+                f"{total_successful} successful, {total_failed} failed, {total_processed} processed"
+            )
+        else:
+            logger.info(
+                f"Successfully processed {total_processed} media items across all libraries"
+            )
 
         # Print failure summary at end of run
         log_failure_summary()

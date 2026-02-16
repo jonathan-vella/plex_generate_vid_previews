@@ -403,6 +403,44 @@ class TestWorkerPool:
         # Should not crash
         pool.shutdown()
 
+    @patch("plex_generate_previews.worker.process_item")
+    def test_worker_pool_stats_are_per_library(self, mock_process):
+        """Returned processing stats should be scoped to one library call."""
+        mock_process.return_value = None
+
+        pool = WorkerPool(gpu_workers=0, cpu_workers=1, selected_gpus=[])
+        config = MagicMock()
+        plex = MagicMock()
+        worker_progress = MagicMock()
+        worker_progress.add_task = MagicMock(return_value=0)
+        main_progress = MagicMock()
+
+        first_items = [
+            ("key1", "Movie 1", "movie"),
+            ("key2", "Movie 2", "movie"),
+        ]
+        second_items = [("key3", "Movie 3", "movie")]
+
+        first_result = pool.process_items(
+            first_items,
+            config,
+            plex,
+            worker_progress,
+            main_progress,
+        )
+        second_result = pool.process_items(
+            second_items,
+            config,
+            plex,
+            worker_progress,
+            main_progress,
+        )
+
+        assert first_result["completed"] == 2
+        assert first_result["failed"] == 0
+        assert second_result["completed"] == 1
+        assert second_result["failed"] == 0
+
     @patch("plex_generate_previews.media_processing.process_item")
     def test_worker_pool_task_completion(self, mock_process):
         """Test that all tasks complete."""
